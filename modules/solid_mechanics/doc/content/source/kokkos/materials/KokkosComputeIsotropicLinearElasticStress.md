@@ -14,7 +14,10 @@ and its strain derivative as full $3 \times 3$ and $3 \times 3 \times 3 \times 3
 properties from a deformation gradient property, typically the output of
 [KokkosComputeDeformationGradient](KokkosComputeDeformationGradient.md), which includes the F-bar
 correction and the homogenization gradient. On a two-dimensional mesh the out-of-plane row of $F$ is
-the identity, so the stress is the plane-strain stress. The outputs are inputs for
+the identity, so the stress is the plane-strain stress. Eigenstrains listed in
+[!param](/Materials/KokkosComputeIsotropicLinearElasticStress/eigenstrain_names), for example from
+[KokkosComputeThermalExpansionEigenstrain](KokkosComputeThermalExpansionEigenstrain.md), are
+subtracted from $\varepsilon$. The outputs are inputs for
 [KokkosComputeLagrangianStressCustomSmall](KokkosComputeLagrangianStressCustomSmall.md).
 
 ## Example Input Syntax
