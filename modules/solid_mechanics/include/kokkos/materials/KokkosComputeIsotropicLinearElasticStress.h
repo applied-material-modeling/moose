@@ -17,6 +17,9 @@
  * property, for example the output of KokkosComputeDeformationGradient, which includes the F-bar
  * correction and the homogenization gradient. In 2D the out-of-plane row of F is the identity, so
  * the stress is the plane-strain stress including sigma_zz.
+ *
+ * Optional eigenstrains are subtracted from the strain, as the host ComputeLagrangianStrain does
+ * with small kinematics: sigma = C : (sym(F) - I - sum(eigenstrains)).
  */
 class KokkosComputeIsotropicLinearElasticStress : public Moose::Kokkos::Material
 {
@@ -34,6 +37,8 @@ private:
   Moose::Kokkos::MaterialProperty<Real, 2> _deformation_gradient;
   Moose::Kokkos::MaterialProperty<Real, 2> _stress;
   Moose::Kokkos::MaterialProperty<Real, 4> _tangent;
+  const unsigned int _num_eigenstrains;
+  Moose::Kokkos::Array<Moose::Kokkos::MaterialProperty<Real, 2>> _eigenstrains;
 };
 
 template <typename Derived>
@@ -45,11 +50,23 @@ KokkosComputeIsotropicLinearElasticStress::computeQpProperties(const unsigned in
   auto stress = _stress(datum, qp);
   auto tangent = _tangent(datum, qp);
 
-  const Real trace = F(0, 0) + F(1, 1) + F(2, 2) - 3;
+  Real strain[3][3];
+  for (unsigned int i = 0; i < 3; ++i)
+    for (unsigned int j = 0; j < 3; ++j)
+      strain[i][j] = 0.5 * (F(i, j) + F(j, i)) - (i == j);
+  for (unsigned int e = 0; e < _num_eigenstrains; ++e)
+  {
+    const auto eigenstrain = _eigenstrains[e](datum, qp);
+    for (unsigned int i = 0; i < 3; ++i)
+      for (unsigned int j = 0; j < 3; ++j)
+        strain[i][j] -= eigenstrain(i, j);
+  }
+
+  const Real trace = strain[0][0] + strain[1][1] + strain[2][2];
   for (unsigned int i = 0; i < 3; ++i)
     for (unsigned int j = 0; j < 3; ++j)
     {
-      stress(i, j) = _lambda * trace * (i == j) + _mu * (F(i, j) + F(j, i) - 2 * (i == j));
+      stress(i, j) = _lambda * trace * (i == j) + 2 * _mu * strain[i][j];
 
       for (unsigned int k = 0; k < 3; ++k)
         for (unsigned int l = 0; l < 3; ++l)

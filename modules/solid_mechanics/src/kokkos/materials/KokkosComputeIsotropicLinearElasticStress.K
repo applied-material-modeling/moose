@@ -27,6 +27,8 @@ KokkosComputeIsotropicLinearElasticStress::validParams()
   params.addParam<MaterialPropertyName>("stress", "stress", "Name of the stress material property.");
   params.addParam<MaterialPropertyName>(
       "tangent", "Jacobian_mult", "Name of the constitutive tangent material property.");
+  params.addParam<std::vector<MaterialPropertyName>>(
+      "eigenstrain_names", {}, "Eigenstrains subtracted from the strain.");
   return params;
 }
 
@@ -38,6 +40,11 @@ KokkosComputeIsotropicLinearElasticStress::KokkosComputeIsotropicLinearElasticSt
     _mu(getParam<Real>("youngs_modulus") / (2 * (1 + getParam<Real>("poissons_ratio")))),
     _deformation_gradient(getKokkosMaterialProperty<Real, 2>("deformation_gradient")),
     _stress(declareKokkosProperty<Real, 2>("stress", {3, 3})),
-    _tangent(declareKokkosProperty<Real, 4>("tangent", {3, 3, 3, 3}))
+    _tangent(declareKokkosProperty<Real, 4>("tangent", {3, 3, 3, 3})),
+    _num_eigenstrains(getParam<std::vector<MaterialPropertyName>>("eigenstrain_names").size())
 {
+  const auto & names = getParam<std::vector<MaterialPropertyName>>("eigenstrain_names");
+  _eigenstrains.create(names.size());
+  for (const auto i : index_range(names))
+    _eigenstrains[i] = getKokkosMaterialPropertyByName<Real, 2>(names[i]);
 }
