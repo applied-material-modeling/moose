@@ -21,6 +21,10 @@
  *
  * The Kokkos total-Lagrangian stress materials work directly from the deformation gradient, so
  * this material only provides the strain output of the host system.
+ *
+ * With effective_strain set it also accumulates the effective strain of the increments,
+ * effective_strain = effective_strain_old + sqrt(2/3 dstrain : dstrain), as the host
+ * RankTwoInvariant with invariant = EffectiveStrain does.
  */
 class KokkosComputeLagrangianIncrementalStrain : public Moose::Kokkos::Material
 {
@@ -40,6 +44,8 @@ public:
         F_store(i, j) = i == j;
         strain(i, j) = 0;
       }
+    if (_has_effective_strain)
+      _effective_strain(datum, qp) = 0;
   }
 
   template <typename Derived>
@@ -52,6 +58,9 @@ private:
   Moose::Kokkos::MaterialProperty<Real, 2> _F_store_old;
   Moose::Kokkos::MaterialProperty<Real, 2> _strain;
   Moose::Kokkos::MaterialProperty<Real, 2> _strain_old;
+  const bool _has_effective_strain;
+  Moose::Kokkos::MaterialProperty<Real, 0> _effective_strain;
+  Moose::Kokkos::MaterialProperty<Real, 0> _effective_strain_old;
 };
 
 template <typename Derived>
@@ -90,7 +99,16 @@ KokkosComputeLagrangianIncrementalStrain::computeQpProperties(const unsigned int
 
   const auto strain_old = _strain_old(datum, qp);
   auto strain = _strain(datum, qp);
+  Real dd2 = 0;
   for (unsigned int i = 0; i < 3; ++i)
     for (unsigned int j = 0; j < 3; ++j)
-      strain(i, j) = strain_old(i, j) + 0.5 * (dL(i, j) + dL(j, i));
+    {
+      const Real dd = 0.5 * (dL(i, j) + dL(j, i));
+      strain(i, j) = strain_old(i, j) + dd;
+      dd2 += dd * dd;
+    }
+
+  if (_has_effective_strain)
+    _effective_strain(datum, qp) =
+        _effective_strain_old(datum, qp) + ::Kokkos::sqrt(2.0 / 3.0 * dd2);
 }

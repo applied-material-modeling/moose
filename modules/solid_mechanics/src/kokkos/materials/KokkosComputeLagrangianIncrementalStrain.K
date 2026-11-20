@@ -21,6 +21,10 @@ KokkosComputeLagrangianIncrementalStrain::validParams()
   params.addParam<MaterialPropertyName>(
       "deformation_gradient", "deformation_gradient", "The deformation gradient.");
   params.addParam<MaterialPropertyName>("strain", "mechanical_strain", "Name of the strain.");
+  params.addParam<MaterialPropertyName>(
+      "effective_strain",
+      "Optional name of the accumulated effective strain of the strain increments (the host "
+      "RankTwoInvariant EffectiveStrain).");
   return params;
 }
 
@@ -32,6 +36,13 @@ KokkosComputeLagrangianIncrementalStrain::KokkosComputeLagrangianIncrementalStra
     _F_store(declareKokkosPropertyByName<Real, 2>(name() + "_deformation_gradient", {3, 3})),
     _F_store_old(getKokkosMaterialPropertyOldByName<Real, 2>(name() + "_deformation_gradient")),
     _strain(declareKokkosProperty<Real, 2>("strain", {3, 3})),
-    _strain_old(getKokkosMaterialPropertyOld<Real, 2>("strain"))
+    _strain_old(getKokkosMaterialPropertyOld<Real, 2>("strain")),
+    _has_effective_strain(isParamValid("effective_strain")),
+    _effective_strain(_has_effective_strain
+                          ? declareKokkosProperty<Real, 0>("effective_strain")
+                          : Moose::Kokkos::MaterialProperty<Real, 0>()),
+    _effective_strain_old(_has_effective_strain
+                              ? getKokkosMaterialPropertyOld<Real, 0>("effective_strain")
+                              : Moose::Kokkos::MaterialProperty<Real, 0>())
 {
 }
