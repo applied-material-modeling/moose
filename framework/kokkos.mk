@@ -66,6 +66,12 @@ ifeq ($(PETSC_HAVE_KOKKOS),1)
   endif
   ifeq ($(PETSC_HAVE_SYCL),1)
     SYCL_ARCH := $(shell sed -n 's/\#define PETSC_SYCL_DEVICE //p' $(PETSC_CONF))
+    # Newer PETSc (e.g. 3.25) no longer defines PETSC_SYCL_DEVICE; its AOT device is then only in
+    # the SYCL linker flags of petscvariables (-Xsycl-target-backend "-device <arch>")
+    ifeq ($(SYCL_ARCH),)
+      SYCL_ARCH := $(shell sed -n 's/.*-Xsycl-target-backend "-device \([^"]*\)".*/\1/p' \
+                     $(dir $(PETSC_CONF))../lib/petsc/conf/petscvariables 2>/dev/null | head -1)
+    endif
   endif
 else
   $(error PETSc was not configured with Kokkos support)
@@ -117,7 +123,9 @@ else ifneq ($(PETSC_HAVE_SYCL),)
   KOKKOS_CPPFLAGS    = $(libmesh_CPPFLAGS) $(ADDITIONAL_CPPFLAGS) ${ADDITIONAL_KOKKOS_CPPFLAGS}
   KOKKOS_LDFLAGS     = -fsycl
   ifneq ($(SYCL_ARCH),)
-    KOKKOS_CXXLFAGS += -fsycl-targets=spir64_gen
+    # With -fno-sycl-rdc the device code of each translation unit is generated at compile time,
+    # so the ahead-of-time target must be on the compile line, not only the link line
+    KOKKOS_CXXFLAGS += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device $(SYCL_ARCH)"
     KOKKOS_LDFLAGS  += -fsycl-targets=spir64_gen -Xsycl-target-backend "-device $(SYCL_ARCH)"
   endif
 else
