@@ -23,9 +23,12 @@
  * The material publishes what KokkosTotalLagrangianStressDivergence and
  * KokkosHomogenizedTotalLagrangianStressDivergence consume with large kinematics: pk1_stress and
  * dpk1_d_grad_u and, with stabilize_strain, the total-mode F-bar chain fbar_A, fbar_gamma_over_3
- * and dpk1_bypass_fbar (as KokkosComputeLagrangianStressCustomPK2 does). It also publishes the
- * Cauchy stress P F_ust^T / det(F_ust), as the host ComputeLagrangianStressPK1 does, where F_ust
- * is the unstabilized deformation gradient including the homogenization gradient.
+ * and dpk1_bypass_fbar (as KokkosComputeLagrangianStressCustomPK2 does).
+ *
+ * As in the host ComputeLagrangianStressPK1, F-bar replaces F only in the constitutive model: the
+ * Cauchy stress is the push-forward of the constitutive stress with the stabilized F,
+ * sigma = tau / det(F), and the PK1 stress is its pull-back with the unstabilized deformation
+ * gradient F_ust (including the homogenization gradient), P = det(F_ust) sigma F_ust^-T.
  */
 class KokkosComputeSimoHughesJ2PlasticityStress : public Moose::Kokkos::Material
 {
@@ -244,38 +247,41 @@ KokkosComputeSimoHughesJ2PlasticityStress::computeQpProperties(const unsigned in
       tau(i, j) =
           (i == j) * _K * (detJ * detJ - 1) / 2 + _G * (be(i, j) - (i == j) * tr_be / 3);
 
-  const Real33 tau_Fit = tau * Fit;
+  // F-bar replaces F only in the constitutive model (de Souza Neto et al. 1996), as in the host
+  // ComputeLagrangianStressPK1: the Cauchy stress is the push-forward with the stabilized F,
+  // sigma = tau / det(F), and the residual stress is its pull-back with the unstabilized F_ust,
+  // P = det(F_ust) sigma F_ust^-T. Without F-bar, F_ust = F and P = tau F^-T.
+  Real33 F_ust;
   {
-    auto pk1 = _pk1_stress(datum, qp);
-    for (unsigned int i = 0; i < 3; ++i)
-      for (unsigned int j = 0; j < 3; ++j)
-        pk1(i, j) = tau_Fit(i, j);
-
-    // Cauchy stress with the unstabilized deformation gradient
-    Real33 F_ust;
     const auto Fu = _F_ust(datum, qp);
     for (unsigned int i = 0; i < 3; ++i)
       for (unsigned int j = 0; j < 3; ++j)
         F_ust(i, j) = Fu(i, j);
-    const Real J_ust = F_ust.determinant();
+  }
+  const Real J_ust = F_ust.determinant();
+  const Real33 F_ust_invT = F_ust.inverse().transpose();
+  const Real33 sigma = (1.0 / detJ) * tau;
+  const Real33 P = J_ust * (sigma * F_ust_invT);
+  {
+    auto pk1 = _pk1_stress(datum, qp);
     auto cauchy = _cauchy_stress(datum, qp);
     for (unsigned int i = 0; i < 3; ++i)
       for (unsigned int j = 0; j < 3; ++j)
       {
-        Real v = 0;
-        for (unsigned int k = 0; k < 3; ++k)
-          v += tau_Fit(i, k) * F_ust(j, k);
-        cauchy(i, j) = v / J_ust;
+        pk1(i, j) = P(i, j);
+        cauchy(i, j) = sigma(i, j);
       }
   }
 
   if (!jac)
     return;
 
-  // Consistent tangent T = dPK1/dF
+  // Tc = dP/dF at fixed F_ust, through sigma(F):
   // d_tau_d_F = K J^2 I x F^-T + G (d_be_d_F - 1/3 I x tr(d_be_d_F))
-  // T(i,j,k,l) = sum_m F^-T(m,j) d_tau_d_F(i,m,k,l) - F^-T(k,j) (tau F^-T)(i,l)
-  Real T[3][3][3][3];
+  // dsigma/dF = (d_tau_d_F - tau x F^-T) / det(F)
+  // Tc(i,j,k,l) = det(F_ust) sum_m dsigma/dF(i,m,k,l) F_ust^-T(m,j)
+  const Real c_ust = J_ust / detJ;
+  Real Tc[3][3][3][3];
   for (unsigned int k = 0; k < 3; ++k)
     for (unsigned int l = 0; l < 3; ++l)
     {
@@ -283,16 +289,22 @@ KokkosComputeSimoHughesJ2PlasticityStress::computeQpProperties(const unsigned in
       for (unsigned int i = 0; i < 3; ++i)
         for (unsigned int j = 0; j < 3; ++j)
         {
-          Real v = -Fit(k, j) * tau_Fit(i, l);
+          Real v = 0;
           for (unsigned int m = 0; m < 3; ++m)
           {
             const Real d_tau = _K * detJ * detJ * (i == m) * Fit(k, l) +
                                _G * (d_be_d_F[i][m][k][l] - (i == m) * tr_dbe / 3);
-            v += Fit(m, j) * d_tau;
+            v += (d_tau - tau(i, m) * Fit(k, l)) * F_ust_invT(m, j);
           }
-          T[i][j][k][l] = v;
+          Tc[i][j][k][l] = c_ust * v;
         }
     }
+
+  // Geometric part of dP/dF_ust at fixed sigma:
+  // geom(i,j,k,l) = P(i,j) F_ust^-T(k,l) - P(i,l) F_ust^-T(k,j)
+  auto geom = [&](const unsigned int i, const unsigned int j, const unsigned int k,
+                  const unsigned int l)
+  { return P(i, j) * F_ust_invT(k, l) - P(i, l) * F_ust_invT(k, j); };
 
   auto dpk1 = _dpk1_d_grad_u(datum, qp);
   if (!_stabilize_strain)
@@ -301,12 +313,15 @@ KokkosComputeSimoHughesJ2PlasticityStress::computeQpProperties(const unsigned in
       for (unsigned int j = 0; j < 3; ++j)
         for (unsigned int k = 0; k < 3; ++k)
           for (unsigned int l = 0; l < 3; ++l)
-            dpk1(i, j, k, l) = T[i][j][k][l];
+            dpk1(i, j, k, l) = geom(i, j, k, l) + Tc[i][j][k][l];
     return;
   }
 
-  // Total-mode F-bar chain, as in the host ComputeLagrangianStressPK1:
-  // dPK1/dF_ust = T : (gamma I4 - gamma/3 U x U^-T) with U = I + grad(u)
+  // Total-mode F-bar chain, as in the host ComputeLagrangianStressBase:
+  // dP/dF_ust = geom + Tc : (gamma I4 - gamma/3 U x U^-T) with U = I + grad(u), and the
+  // non-local part Tc : (gamma/3 U x F_avg^-T) assembled by the kernels from A = Tc : U.
+  // The bypass tangent (the derivative with respect to the homogenization gradient, which adds
+  // to F and F_ust after F-bar) is geom + Tc.
   Real33 U;
   for (unsigned int i = 0; i < 3; ++i)
     for (unsigned int j = 0; j < 3; ++j)
@@ -336,13 +351,14 @@ KokkosComputeSimoHughesJ2PlasticityStress::computeQpProperties(const unsigned in
       Real a = 0;
       for (unsigned int m = 0; m < 3; ++m)
         for (unsigned int n = 0; n < 3; ++n)
-          a += T[i][j][m][n] * U(m, n);
+          a += Tc[i][j][m][n] * U(m, n);
       A(i, j) = a;
       for (unsigned int k = 0; k < 3; ++k)
         for (unsigned int l = 0; l < 3; ++l)
         {
-          bypass(i, j, k, l) = T[i][j][k][l];
-          dpk1(i, j, k, l) = gamma * T[i][j][k][l] - g3 * a * U_invT(k, l);
+          const Real g = geom(i, j, k, l);
+          bypass(i, j, k, l) = g + Tc[i][j][k][l];
+          dpk1(i, j, k, l) = g + gamma * Tc[i][j][k][l] - g3 * a * U_invT(k, l);
         }
     }
 }

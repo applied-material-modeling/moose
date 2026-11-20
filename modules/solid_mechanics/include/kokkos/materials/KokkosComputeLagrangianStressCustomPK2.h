@@ -18,10 +18,12 @@
  * Converts full PK2 stress and its deformation-gradient derivative to PK1 quantities.
  *
  * The bulk specialization also supports the total-mode F-bar Jacobian chain and a homogenization
- * gradient H. As in the host ComputeLagrangianStressCustomPK2, PK1 = (F_ust + H) PK2, where the
- * F-bar chain dF_stab/dF_ust acts on the displacement-only F_ust. With both, it also publishes the
- * bypass tangent, the PK1 tangent with dF_stab/dF_ust replaced by the identity, which is the
- * derivative with respect to H. Interface specializations operate on the primary or neighbor
+ * gradient H. Without F-bar, PK1 = (F_ust + H) PK2. With F-bar, as in the host
+ * ComputeLagrangianStressCustomPK2, F-bar replaces F only in the constitutive model: the Cauchy
+ * stress is sigma = Fbar PK2 Fbar^T / det(Fbar) with the stabilized Fbar = gamma F_ust + H, and
+ * PK1 = det(F) sigma F^-T with F = F_ust + H. The F-bar chain dF_stab/dF_ust acts on the
+ * displacement-only F_ust. With both, it also publishes the bypass tangent, the PK1 tangent with
+ * dF_stab/dF_ust replaced by the identity, which is the derivative with respect to H. Interface specializations operate on the primary or neighbor
  * material-property storage and intentionally reject F-bar because the SCZM kernel does not
  * assemble its non-local coupling.
  */
@@ -146,19 +148,19 @@ KokkosComputeLagrangianStressCustomPK2Templ<interface, neighbor>::convertPK2ToPK
           Fw[i][j] += H(i, j);
     }
 
-  for (unsigned int i = 0; i < 3; ++i)
-    for (unsigned int J = 0; J < 3; ++J)
-    {
-      pk1(i, J) = 0;
-      for (unsigned int K = 0; K < 3; ++K)
-        pk1(i, J) += Fw[i][K] * pk2(K, J);
-    }
-
-  if (!_need_jacobian_device)
-    return;
-
   if (!_stabilize_strain_device)
   {
+    for (unsigned int i = 0; i < 3; ++i)
+      for (unsigned int J = 0; J < 3; ++J)
+      {
+        pk1(i, J) = 0;
+        for (unsigned int K = 0; K < 3; ++K)
+          pk1(i, J) += Fw[i][K] * pk2(K, J);
+      }
+
+    if (!_need_jacobian_device)
+      return;
+
     for (unsigned int i = 0; i < 3; ++i)
       for (unsigned int J = 0; J < 3; ++J)
         for (unsigned int k = 0; k < 3; ++k)
@@ -171,59 +173,108 @@ KokkosComputeLagrangianStressCustomPK2Templ<interface, neighbor>::convertPK2ToPK
     return;
   }
 
-  const Real detF = F[0][0] * (F[1][1] * F[2][2] - F[1][2] * F[2][1]) -
-                    F[0][1] * (F[1][0] * F[2][2] - F[1][2] * F[2][0]) +
-                    F[0][2] * (F[1][0] * F[2][1] - F[1][1] * F[2][0]);
-  const auto F_avg = _F_avg(datum, qp);
-  const Real detFavg = F_avg(0, 0) * (F_avg(1, 1) * F_avg(2, 2) - F_avg(1, 2) * F_avg(2, 1)) -
-                       F_avg(0, 1) * (F_avg(1, 0) * F_avg(2, 2) - F_avg(1, 2) * F_avg(2, 0)) +
-                       F_avg(0, 2) * (F_avg(1, 0) * F_avg(2, 1) - F_avg(1, 1) * F_avg(2, 0));
-  const Real ratio = detFavg / detF;
-  const Real gamma = (ratio < 0.0 ? -1.0 : 1.0) * ::Kokkos::pow(::Kokkos::fabs(ratio), 1.0 / 3.0);
+  using Moose::Kokkos::Real33;
 
-  Real Cof[3][3];
-  Cof[0][0] = F[1][1] * F[2][2] - F[1][2] * F[2][1];
-  Cof[0][1] = -(F[1][0] * F[2][2] - F[1][2] * F[2][0]);
-  Cof[0][2] = F[1][0] * F[2][1] - F[1][1] * F[2][0];
-  Cof[1][0] = -(F[0][1] * F[2][2] - F[0][2] * F[2][1]);
-  Cof[1][1] = F[0][0] * F[2][2] - F[0][2] * F[2][0];
-  Cof[1][2] = -(F[0][0] * F[2][1] - F[0][1] * F[2][0]);
-  Cof[2][0] = F[0][1] * F[1][2] - F[0][2] * F[1][1];
-  Cof[2][1] = -(F[0][0] * F[1][2] - F[0][2] * F[1][0]);
-  Cof[2][2] = F[0][0] * F[1][1] - F[0][1] * F[1][0];
-  Real Fust_invT[3][3];
+  // Total-mode F-bar on the displacement-only U = F_ust: Fbar = gamma U + H,
+  // gamma = (det(F_avg) / det(U))^(1/3)
+  Real33 U, Fu, Fb, S;
   for (unsigned int i = 0; i < 3; ++i)
     for (unsigned int j = 0; j < 3; ++j)
-      Fust_invT[i][j] = Cof[i][j] / detF;
+    {
+      U(i, j) = F[i][j];
+      Fu(i, j) = Fw[i][j];
+      S(i, j) = pk2(i, j);
+    }
+  Real33 F_avg;
+  {
+    const auto Fa = _F_avg(datum, qp);
+    for (unsigned int i = 0; i < 3; ++i)
+      for (unsigned int j = 0; j < 3; ++j)
+        F_avg(i, j) = Fa(i, j);
+  }
+  const Real ratio = F_avg.determinant() / U.determinant();
+  const Real gamma = (ratio < 0.0 ? -1.0 : 1.0) * ::Kokkos::cbrt(::Kokkos::fabs(ratio));
+  for (unsigned int i = 0; i < 3; ++i)
+    for (unsigned int j = 0; j < 3; ++j)
+      Fb(i, j) = Fu(i, j) + (gamma - 1.0) * U(i, j);
 
+  // Constitutive PK1 Pbar = Fbar S, Cauchy stress sigma = Pbar Fbar^T / det(Fbar), and the
+  // pull-back P = det(F) sigma F^-T with the unstabilized F = U + H
+  const Real Jb = Fb.determinant();
+  const Real Ju = Fu.determinant();
+  const Real33 Fb_invT = Fb.inverse().transpose();
+  const Real33 Fu_invT = Fu.inverse().transpose();
+  const Real33 Pb = Fb * S;
+  const Real33 sigma = (1.0 / Jb) * (Pb * Fb.transpose());
+  const Real33 P = Ju * (sigma * Fu_invT);
+  for (unsigned int i = 0; i < 3; ++i)
+    for (unsigned int J = 0; J < 3; ++J)
+      pk1(i, J) = P(i, J);
+
+  if (!_need_jacobian_device)
+    return;
+
+  // Tc = dP/dFbar at fixed F:
+  //   dPbar/dFbar(i,n,k,l) = d_ik S(l,n) + Fbar(i,K) dS/dFbar(K,n,k,l)
+  //   dsigma/dFbar(i,m,k,l) = [dPbar/dFbar(i,n,k,l) Fbar(m,n) + Pbar(i,l) d_mk] / det(Fbar)
+  //                           - sigma(i,m) Fbar^-T(k,l)
+  //   Tc(i,j,k,l) = det(F) dsigma/dFbar(i,m,k,l) F^-T(m,j)
+  Real Tc[3][3][3][3];
+  for (unsigned int k = 0; k < 3; ++k)
+    for (unsigned int l = 0; l < 3; ++l)
+    {
+      Real33 dPb;
+      for (unsigned int i = 0; i < 3; ++i)
+        for (unsigned int n = 0; n < 3; ++n)
+        {
+          Real v = (i == k) * S(l, n);
+          for (unsigned int K = 0; K < 3; ++K)
+            v += Fb(i, K) * dpk2_dF(K, n, k, l);
+          dPb(i, n) = v;
+        }
+      Real33 dsig;
+      for (unsigned int i = 0; i < 3; ++i)
+        for (unsigned int m = 0; m < 3; ++m)
+        {
+          Real v = (m == k) * Pb(i, l);
+          for (unsigned int n = 0; n < 3; ++n)
+            v += dPb(i, n) * Fb(m, n);
+          dsig(i, m) = v / Jb - sigma(i, m) * Fb_invT(k, l);
+        }
+      for (unsigned int i = 0; i < 3; ++i)
+        for (unsigned int j = 0; j < 3; ++j)
+        {
+          Real v = 0;
+          for (unsigned int m = 0; m < 3; ++m)
+            v += dsig(i, m) * Fu_invT(m, j);
+          Tc[i][j][k][l] = Ju * v;
+        }
+    }
+
+  // dP/dF_ust = geom + Tc : (gamma I4 - gamma/3 U x U^-T), with the geometric part at fixed
+  // sigma geom(i,j,k,l) = P(i,j) F^-T(k,l) - P(i,l) F^-T(k,j). The kernels assemble the
+  // non-local part from A = Tc : U, and the bypass tangent (the derivative with respect to H,
+  // which adds to F and Fbar after F-bar) is geom + Tc.
+  const Real33 U_invT = U.inverse().transpose();
+  const Real g3 = gamma / 3.0;
+  _gamma_over_3(datum, qp) = g3;
   auto A_prop = _A(datum, qp);
-  Real Aij[3][3];
   for (unsigned int i = 0; i < 3; ++i)
     for (unsigned int J = 0; J < 3; ++J)
     {
-      Real s = 0.0;
-      for (unsigned int K = 0; K < 3; ++K)
-        for (unsigned int m = 0; m < 3; ++m)
-          for (unsigned int n = 0; n < 3; ++n)
-            s += Fw[i][K] * dpk2_dF(K, J, m, n) * F[m][n];
-      Aij[i][J] = s;
-      A_prop(i, J) = s;
-    }
-
-  const Real g3 = gamma / 3.0;
-  _gamma_over_3(datum, qp) = g3;
-  for (unsigned int i = 0; i < 3; ++i)
-    for (unsigned int J = 0; J < 3; ++J)
+      Real a = 0;
+      for (unsigned int m = 0; m < 3; ++m)
+        for (unsigned int n = 0; n < 3; ++n)
+          a += Tc[i][J][m][n] * U(m, n);
+      A_prop(i, J) = a;
       for (unsigned int k = 0; k < 3; ++k)
         for (unsigned int L = 0; L < 3; ++L)
         {
-          Real v = 0.0;
-          for (unsigned int K = 0; K < 3; ++K)
-            v += Fw[i][K] * dpk2_dF(K, J, k, L);
-          dpk1_d_grad_u(i, J, k, L) =
-              (i == k) * pk2(L, J) + gamma * v - g3 * Aij[i][J] * Fust_invT[k][L];
+          const Real geom = P(i, J) * Fu_invT(k, L) - P(i, L) * Fu_invT(k, J);
+          dpk1_d_grad_u(i, J, k, L) = geom + gamma * Tc[i][J][k][L] - g3 * a * U_invT(k, L);
           if constexpr (!interface)
             if (_has_homogenization_gradient)
-              _dpk1_bypass_fbar(datum, qp)(i, J, k, L) = (i == k) * pk2(L, J) + v;
+              _dpk1_bypass_fbar(datum, qp)(i, J, k, L) = geom + Tc[i][J][k][L];
         }
+    }
 }
